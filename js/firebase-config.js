@@ -12,7 +12,7 @@ import { getAuth, GoogleAuthProvider } from "https://www.gstatic.com/firebasejs/
 import { getFirestore } from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyAWW7qGBLd8J19Fx6juROxt5DRKweaEB8",
+  apiKey: "AIzaSyAWW7qGBLd8J19Fx6juROxt5DRKweaEBj8",
   authDomain: "panavibunga-store.firebaseapp.com",
   projectId: "panavibunga-store",
   storageBucket: "panavibunga-store.firebasestorage.app",
