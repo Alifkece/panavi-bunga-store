@@ -6,7 +6,7 @@ rules_version = '2';
 // / `firebase deploy --only firestore:rules` pada project panavibunga-store
 // SAJA — jangan pernah deploy file ini ke project Firebase lama.
 //
-// Admin PanaviBunga Store: panavi@my.id (sudah diisi di bawah, fungsi
+// Admin PanaviBunga Store: alasky200@gmail.com (sudah diisi di bawah, fungsi
 // isAdmin()). Kalau suatu saat perlu ganti admin, cukup ubah email di
 // baris isAdmin() di bawah ini.
 
@@ -15,7 +15,7 @@ service cloud.firestore {
 
     function isAdmin() {
       return request.auth != null &&
-             request.auth.token.email == "panavi@my.id";
+             request.auth.token.email == "alasky200@gmail.com";
     }
 
     function isLoggedIn() {
