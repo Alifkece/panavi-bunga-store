@@ -349,8 +349,12 @@ async function handleLogin() {
     await signInWithEmailAndPassword(auth, email, pass);
     showNotif('Berhasil masuk', 'success');
   } catch(e) {
-    errEl.textContent = getAuthError(e.code);
+    // [DEBUG SEMENTARA] tampilkan kode error asli dari Firebase supaya
+    // gampang didiagnosis dari HP tanpa buka console. Hapus baris
+    // "(" + (e.code || e.message) + ")" di bawah ini kalau sudah selesai debug.
+    errEl.textContent = getAuthError(e.code) + ' (' + (e.code || e.message) + ')';
     errEl.style.display = 'block';
+    console.error('Login error:', e);
   }
   btn.innerHTML = '<span>Masuk</span>';
   btn.disabled = false;
@@ -376,8 +380,12 @@ async function handleRegister() {
     // halaman OTP — PanaviBunga Store mewajibkan OTP untuk SETIAP sesi
     // login baru, termasuk sesi hasil baru saja mendaftar.
   } catch(e) {
-    errEl.textContent = getAuthError(e.code);
+    // [DEBUG SEMENTARA] tampilkan kode error asli dari Firebase supaya
+    // gampang didiagnosis dari HP tanpa buka console. Hapus baris
+    // "(" + (e.code || e.message) + ")" di bawah ini kalau sudah selesai debug.
+    errEl.textContent = getAuthError(e.code) + ' (' + (e.code || e.message) + ')';
     errEl.style.display = 'block';
+    console.error('Register error:', e);
   }
   btn.innerHTML = '<span>Buat Akun</span>';
   btn.disabled = false;
