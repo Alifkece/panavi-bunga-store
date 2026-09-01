@@ -37,6 +37,47 @@ let otpCooldownInterval = null;
 let otpNextResendAt = 0;
 let otpBusy = false;
 
+// BUG FIX (audit round 3): "Berhasil masuk" tidak lagi ditampilkan langsung
+// setelah signInWithEmailAndPassword/signInWithPopup/createUserWithEmailAndPassword
+// berhasil — itu hanya berarti Firebase Auth berhasil, BUKAN berarti alur
+// login sudah selesai (masih ada OTP gate di belakangnya). Sekarang
+// handleLogin/handleGoogleLogin/handleRegister/handleVerifyOtp hanya
+// menaikkan flag ini; notifikasi "Berhasil masuk" baru benar-benar
+// ditampilkan oleh runOtpGate() TEPAT setelah halaman utama (Store) resmi
+// ditampilkan (verified === true), supaya urutan selalu: Firebase Auth ->
+// OTP Check -> OTP Verification (jika perlu) -> Session Confirmation ->
+// Navigation ke Store -> baru Success Notification.
+let pendingAuthSuccessNotif = false;
+
+// BUG FIX (audit round 3): race condition onAuthStateChanged. Setiap kali
+// callback ini terpanggil (login, logout, login lagi secara cepat), sebuah
+// "generasi" baru dibuat. runOtpGate() yang berjalan untuk generasi LAMA
+// mengecek ulang authGeneration di setiap titik setelah `await` — kalau
+// sudah tidak sama lagi (artinya ada auth event lebih baru yang terjadi di
+// tengah proses), sisa proses generasi lama dihentikan (tidak mengubah UI,
+// tidak melakukan redirect). Ini mencegah hasil check-session/verify dari
+// sesi login yang sudah ditinggalkan (mis. setelah user keburu logout lalu
+// login ulang dengan akun lain) tiba-tiba mengubah tampilan sesi yang aktif
+// sekarang.
+let authGeneration = 0;
+
+// BUG FIX (audit round 3): request timeout. Semua request ke endpoint OTP
+// (/api/auth/check-session, /api/auth/send-otp, /api/auth/verify-otp) kini
+// dibatasi waktu tunggunya lewat AbortController supaya tidak pernah terjadi
+// infinite loading kalau server/koneksi macet. Timeout DIPERLAKUKAN SEBAGAI
+// GAGAL (fail closed) — tidak pernah dianggap sebagai "OTP verified".
+const AUTH_FETCH_TIMEOUT_MS = 15000;
+function fetchWithTimeout(url, options) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), AUTH_FETCH_TIMEOUT_MS);
+  return fetch(url, Object.assign({}, options || {}, { signal: controller.signal })).finally(() =>
+    clearTimeout(timer)
+  );
+}
+function isTimeoutError(e) {
+  return !!(e && e.name === 'AbortError');
+}
+
 // Expose globals — HANYA fungsi untuk Store/User. Tidak ada satupun
 // fungsi/CRUD Admin yang di-expose ke window pada repository ini.
 window.showPage = showPage;
@@ -64,16 +105,20 @@ window.loadMyOrders = loadMyOrders;
 window.selectPackage = selectPackage;
 
 onAuthStateChanged(auth, async user => {
+  // Generasi baru untuk SETIAP firing onAuthStateChanged (login, logout,
+  // ganti akun) — dipakai runOtpGate() untuk membatalkan sisa proses kalau
+  // ada event auth lain yang menyusul sebelum proses ini selesai.
+  const myGeneration = ++authGeneration;
   currentUser = user;
   if (user) {
     // Firebase auth berhasil BUKAN berarti login selesai — tanya ke backend
     // dulu apakah SESI LOGIN INI sudah lolos OTP. Kalau belum, jangan buka
     // halaman utama sama sekali.
-    await runOtpGate(user);
+    await runOtpGate(user, myGeneration);
   } else {
-    currentUser = null;
     otpVerified = false;
     otpGateUid = null;
+    pendingAuthSuccessNotif = false;
     stopOtpCountdown();
     if (stockPollTimer) { clearInterval(stockPollTimer); stockPollTimer = null; }
     updateNavUI();
@@ -100,9 +145,18 @@ onAuthStateChanged(auth, async user => {
 // refresh di sesi yang sama tidak perlu OTP berkali-kali kalau memang
 // sudah pernah verified. Backend adalah satu-satunya sumber kebenaran;
 // frontend tidak pernah menganggap dirinya sendiri "sudah verified".
-async function runOtpGate(user) {
+async function runOtpGate(user, generation) {
+  // Kalau pemanggil tidak memberikan nomor generasi (dipanggil manual dari
+  // handleVerifyOtp, bukan dari listener onAuthStateChanged), pakai
+  // generasi aktif saat ini supaya guard di bawah tetap konsisten.
+  if (generation === undefined) generation = authGeneration;
+
   try {
     const idToken = await user.getIdToken();
+    // Ada auth event lebih baru yang terjadi selagi menunggu token di atas
+    // (mis. user sudah logout/ganti akun) — hentikan, biarkan generasi baru
+    // yang menentukan tampilan.
+    if (generation !== authGeneration) return;
 
     // PanaviBunga Store: OTP WAJIB untuk SEMUA sesi login baru, termasuk
     // sesi hasil baru saja mendaftar (register) maupun login lewat Google.
@@ -110,10 +164,11 @@ async function runOtpGate(user) {
     // melewati check-session di bawah, dan kalau belum verified, akan
     // diarahkan ke halaman OTP.
 
-    const res = await fetch('/api/auth/check-session', {
+    const res = await fetchWithTimeout('/api/auth/check-session', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + idToken },
     });
+    if (generation !== authGeneration) return;
     const data = await res.json().catch(() => ({}));
     const verified = !!(res.ok && data.verified === true);
 
@@ -126,6 +181,15 @@ async function runOtpGate(user) {
       updateNavUI();
       showPage('home');
       loadPublicData();
+      // Seluruh alur (Firebase Auth -> OTP Check -> OTP Verification kalau
+      // perlu -> Session Confirmation) baru benar-benar selesai di titik
+      // ini — Store sudah tampil. Baru sekarang notifikasi sukses boleh
+      // muncul, dan hanya kalau memang dipicu oleh aksi login/register/
+      // verifikasi OTP (bukan oleh refresh/restore sesi biasa).
+      if (pendingAuthSuccessNotif) {
+        pendingAuthSuccessNotif = false;
+        showNotif('Berhasil masuk', 'success');
+      }
       return;
     }
 
@@ -139,11 +203,12 @@ async function runOtpGate(user) {
     const alreadyRequestedKey = 'otpRequested_' + user.uid;
     if (!sessionStorage.getItem(alreadyRequestedKey)) {
       sessionStorage.setItem(alreadyRequestedKey, '1');
-      await requestOtp(user, { silent: true });
+      await requestOtp(user, { silent: true, generation });
     } else {
       // Halaman di-refresh saat OTP belum selesai — jangan kirim email baru,
       // tapi lanjutkan countdown resend dari state yang tersimpan (bukan
       // dari variabel JS yang sudah reset karena reload).
+      if (generation !== authGeneration) return;
       const storedNextResend = Number(sessionStorage.getItem('otpNextResendAt_' + user.uid) || 0);
       if (storedNextResend > Date.now()) {
         otpNextResendAt = storedNextResend;
@@ -156,9 +221,14 @@ async function runOtpGate(user) {
     }
   } catch (e) {
     console.error('runOtpGate error:', e);
-    // Gagal-aman: kalau cek sesi ke backend error, tetap anggap belum
-    // verified dan tampilkan layar OTP — jangan pernah default ke "boleh masuk".
+    if (generation !== authGeneration) return;
+    // Gagal-aman: kalau cek sesi ke backend error/timeout, tetap anggap
+    // belum verified dan tampilkan layar OTP — jangan pernah default ke
+    // "boleh masuk".
     otpVerified = false;
+    if (isTimeoutError(e)) {
+      showNotif('Koneksi ke server timeout. Coba lagi.', 'error');
+    }
     showOtpPage(user);
   }
 }
@@ -347,7 +417,11 @@ async function handleLogin() {
   btn.disabled = true;
   try {
     await signInWithEmailAndPassword(auth, email, pass);
-    showNotif('Berhasil masuk', 'success');
+    // BUG FIX (audit round 3): jangan tampilkan "Berhasil masuk" di sini.
+    // signIn berhasil hanya berarti Firebase Auth lolos — onAuthStateChanged
+    // -> runOtpGate() masih akan menjalankan OTP gate setelah ini. Notifikasi
+    // baru ditampilkan oleh runOtpGate() setelah Store benar-benar terbuka.
+    pendingAuthSuccessNotif = true;
   } catch(e) {
     // [DEBUG SEMENTARA] tampilkan kode error asli dari Firebase supaya
     // gampang didiagnosis dari HP tanpa buka console. Hapus baris
@@ -376,6 +450,9 @@ async function handleRegister() {
     await updateProfile(cred.user, { displayName: name });
     succEl.textContent = 'Akun berhasil dibuat! Verifikasi OTP diperlukan sebelum masuk toko...';
     succEl.style.display = 'block';
+    // "Berhasil masuk" ditampilkan nanti oleh runOtpGate() setelah OTP
+    // register ini diverifikasi dan Store benar-benar terbuka.
+    pendingAuthSuccessNotif = true;
     // onAuthStateChanged -> runOtpGate() akan otomatis mengarahkan ke
     // halaman OTP — PanaviBunga Store mewajibkan OTP untuk SETIAP sesi
     // login baru, termasuk sesi hasil baru saja mendaftar.
@@ -399,6 +476,7 @@ async function handleLogout() {
   // dari backend: auth_time sesi baru tidak akan pernah cocok dengan
   // verifiedAuthTime sesi lama, apapun isi sessionStorage di browser.
   const signingOutUid = currentUser ? currentUser.uid : null;
+  pendingAuthSuccessNotif = false; // batalkan notif "Berhasil masuk" tertunda milik sesi yang baru saja diakhiri
   await signOut(auth);
   if (signingOutUid) {
     sessionStorage.removeItem('otpRequested_' + signingOutUid);
@@ -430,7 +508,10 @@ async function handleGoogleLogin() {
     await signInWithPopup(auth, googleProvider);
     // Sisanya (cek OTP, buka halaman OTP, dst) ditangani otomatis oleh
     // onAuthStateChanged -> runOtpGate(), supaya tidak ada listener auth
-    // yang duplikat.
+    // yang duplikat. "Berhasil masuk" ditampilkan nanti oleh runOtpGate()
+    // setelah OTP (kalau perlu) selesai dan Store benar-benar terbuka —
+    // Google login TIDAK BOLEH bypass OTP maupun notifikasi ini.
+    pendingAuthSuccessNotif = true;
   } catch (e) {
     // User membatalkan popup Google -> jangan crash, jangan tampilkan
     // sebagai error keras, cukup diam-diam kembalikan tombol ke semula.
@@ -469,7 +550,7 @@ function maskEmailClient(email) {
 
 async function requestOtp(user, opts) {
   opts = opts || {};
-  if (otpBusy) return;
+  if (otpBusy) return; // BUG 8: cegah double click memicu dua request OTP sekaligus
   otpBusy = true;
   const resendBtn = document.getElementById('otp-resend-btn');
   const errEl = document.getElementById('otp-error');
@@ -478,10 +559,15 @@ async function requestOtp(user, opts) {
 
   try {
     const idToken = await user.getIdToken();
-    const res = await fetch('/api/auth/send-otp', {
+    // Kalau ada auth event lebih baru (logout/ganti akun) selagi menunggu
+    // token, jangan sentuh UI OTP yang sudah bukan milik sesi ini lagi.
+    if (opts.generation !== undefined && opts.generation !== authGeneration) return;
+
+    const res = await fetchWithTimeout('/api/auth/send-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + idToken },
     });
+    if (opts.generation !== undefined && opts.generation !== authGeneration) return;
     const data = await res.json().catch(() => ({}));
 
     if (!res.ok || !data.success) {
@@ -510,12 +596,16 @@ async function requestOtp(user, opts) {
     startOtpCountdown(otpNextResendAt);
     if (!opts.silent) showNotif('Kode verifikasi dikirim ke email Anda', 'success');
   } catch (e) {
+    if (opts.generation !== undefined && opts.generation !== authGeneration) return;
     if (errEl) {
-      errEl.textContent = 'Gagal mengirim kode verifikasi. Cek koneksi Anda.';
+      errEl.textContent = isTimeoutError(e)
+        ? 'Koneksi ke server timeout. Coba lagi.'
+        : 'Gagal mengirim kode verifikasi. Cek koneksi Anda.';
       errEl.style.display = 'block';
     }
   } finally {
     otpBusy = false;
+    if (resendBtn && Date.now() >= otpNextResendAt) resendBtn.disabled = false;
   }
 }
 
@@ -537,9 +627,10 @@ async function handleVerifyOtp() {
   // UI 6 slot OTP: kunci slot + animasi orbit verifying. Murni tampilan,
   // tidak mempengaruhi request/response di bawah ini.
   if (typeof window.otpSlotsSetVerifying === 'function') window.otpSlotsSetVerifying(true);
+  const verifyGeneration = authGeneration;
   try {
     const idToken = await currentUser.getIdToken();
-    const res = await fetch('/api/auth/verify-otp', {
+    const res = await fetchWithTimeout('/api/auth/verify-otp', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + idToken },
       body: JSON.stringify({ code }),
@@ -555,7 +646,13 @@ async function handleVerifyOtp() {
       sessionStorage.removeItem('otpEmailMasked_' + currentUser.uid);
       sessionStorage.removeItem('otpNextResendAt_' + currentUser.uid);
       stopOtpCountdown();
-      showNotif('Berhasil masuk', 'success');
+      // BUG FIX (audit round 3): jangan tampilkan "Berhasil masuk" di sini.
+      // Backend sudah mengonfirmasi kode benar, tapi urutan yang diminta
+      // adalah OTP Verification -> Session Confirmation -> Navigation ke
+      // Store -> baru Success Notification. Set flag saja; runOtpGate() di
+      // bawah yang akan menampilkannya TEPAT setelah Store benar-benar
+      // terbuka (lewat check-session, backend tetap sumber kebenaran).
+      pendingAuthSuccessNotif = true;
       // Animasi sukses singkat (kalau UI slot tersedia) SEBELUM pindah
       // halaman, supaya transisi tidak terasa kasar/tiba-tiba. Sepenuhnya
       // tampilan — tidak menunda atau mengubah verifikasi itu sendiri,
@@ -563,13 +660,23 @@ async function handleVerifyOtp() {
       if (typeof window.otpSlotsSuccess === 'function') {
         try { await window.otpSlotsSuccess(); } catch (e) { /* abaikan, jangan blokir redirect */ }
       }
+      // Kalau ada auth event lain yang menyusul selagi animasi sukses di
+      // atas berjalan (mis. user sempat logout), jangan paksa redirect ke
+      // Store dengan sesi yang sudah tidak aktif lagi.
+      if (verifyGeneration !== authGeneration) return;
       // Backend sudah menandai sesi login ini verified (verifiedAuthTime),
       // panggil ulang runOtpGate untuk konfirmasi lewat check-session lalu
       // baru buka halaman utama.
-      await runOtpGate(currentUser);
+      await runOtpGate(currentUser, verifyGeneration);
     }
   } catch (e) {
-    if (errEl) { errEl.textContent = 'Gagal memverifikasi kode. Cek koneksi Anda.'; errEl.style.display = 'block'; }
+    pendingAuthSuccessNotif = false;
+    if (errEl) {
+      errEl.textContent = isTimeoutError(e)
+        ? 'Koneksi ke server timeout. Coba lagi.'
+        : 'Gagal memverifikasi kode. Cek koneksi Anda.';
+      errEl.style.display = 'block';
+    }
     if (typeof window.otpSlotsError === 'function') window.otpSlotsError();
   }
   if (btn) { btn.innerHTML = '<span>Verifikasi</span>'; btn.disabled = false; }
