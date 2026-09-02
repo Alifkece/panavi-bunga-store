@@ -17,10 +17,8 @@ let currentSelectedPackageIndex = 0;
 let currentTrackIdx = 0;
 let audioPlayer = null;
 let isPlaying = false;
-let stockItems = [];
-let stockFilter = 'all';
 let myOrders = [];
-let stockPollTimer = null;
+let stockFilter = 'all'; // nama lama, sebenarnya dipakai untuk filter kategori tab produk (bukan stok inventaris)
 let currentHomeTab = 0;
 
 // ===== 2-STEP LOGIN (Email OTP) STATE =====
@@ -120,7 +118,6 @@ onAuthStateChanged(auth, async user => {
     otpGateUid = null;
     pendingAuthSuccessNotif = false;
     stopOtpCountdown();
-    if (stockPollTimer) { clearInterval(stockPollTimer); stockPollTimer = null; }
     updateNavUI();
     // Guest: langsung tampilkan toko, tidak dipaksa ke halaman login dulu.
     // Order/checkout tetap minta login sendiri lewat guard di orderProduct/goOrder.
@@ -238,7 +235,6 @@ async function loadPublicData() {
   await loadSongs();
   await loadStoreProfile();
   await loadAnnouncements();
-  await loadStockPublic();
   renderProducts(products);
   renderTrackDropdown();
   updateBellDot();
@@ -717,49 +713,6 @@ function stopOtpCountdown() {
 }
 
 // ===== PRODUCTS =====
-// Dipakai bersama oleh renderProducts() (badge/tombol) dan orderProduct()
-// (guard sebelum modal checkout dibuka), supaya aturan "stok kosong" selalu
-// konsisten di manapun dicek.
-// CATATAN AUDIT STOK: `stockItems` TIDAK LAGI berisi dokumen stock mentah
-// (yang punya field kredensial seperti email/password) — sekarang berisi
-// hasil agregat AMAN { productId, packageName, availableCount, totalCount }
-// dari endpoint backend /stock-availability (lihat loadStockPublic() di
-// bawah). Firestore Rules production memang membatasi collection "stock"
-// hanya bisa dibaca Admin, jadi membaca collection itu langsung dari
-// browser tidak akan pernah berhasil untuk user biasa - dan tetap berisiko
-// membocorkan kredensial kalau rule itu suatu saat dilonggarkan. Bentuk
-// return getProductStock()/getPackageStock() di bawah TIDAK diubah supaya
-// seluruh pemanggil (renderProducts, orderProduct, renderOrderModalBody,
-// dst) tidak perlu direvisi.
-function getProductStock(productId) {
-  const entries = stockItems.filter(s => s.productId === productId);
-  const availableCount = entries.reduce((sum, e) => sum + (e.availableCount || 0), 0);
-  const totalCount = entries.reduce((sum, e) => sum + (e.totalCount || 0), 0);
-  return {
-    availableCount,
-    totalCount,
-    hasStock: availableCount > 0,
-    hasStockData: totalCount > 0
-  };
-}
-
-// Sama seperti getProductStock() di atas (dipakai untuk badge "x/y tersedia"
-// di kartu produk — total gabungan semua paket, tampilan TIDAK diubah),
-// tapi ini mengecek stok SATU paket spesifik (productId + packageName).
-// Dipakai saat buyer sudah memilih paket, supaya paket yang stoknya kosong
-// tidak dianggap tersedia hanya karena paket lain dari produk yang sama
-// masih ada stok.
-function getPackageStock(productId, packageName) {
-  const entry = stockItems.find(s => s.productId === productId && s.packageName === packageName);
-  const availableCount = entry ? (entry.availableCount || 0) : 0;
-  const totalCount = entry ? (entry.totalCount || 0) : 0;
-  return {
-    availableCount,
-    totalCount,
-    hasStock: availableCount > 0,
-    hasStockData: totalCount > 0
-  };
-}
 
 function renderProducts(list) {
   const grid = document.getElementById('product-grid');
@@ -768,18 +721,7 @@ function renderProducts(list) {
     return;
   }
   grid.innerHTML = list.map(p => {
-    const { availableCount, totalCount, hasStock, hasStockData } = getProductStock(p.id);
-
-    const stockBadgeHtml = hasStockData
-      ? `<div class="stock-badge ${hasStock ? 'stock-badge-available' : 'stock-badge-empty'}">
-          <svg width="8" height="8" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><rect x="2" y="7" width="20" height="14" rx="2"/><path d="M16 7V5a2 2 0 0 0-2-2h-4a2 2 0 0 0-2 2v2"/></svg>
-          ${hasStock ? `${availableCount}/${totalCount} tersedia` : 'STOCK HABIS'}
-        </div>`
-      : '';
-
-    const buyBtn = hasStockData && !hasStock
-      ? `<button class="btn-order-disabled" disabled>Habis</button>`
-      : `<button class="btn-order" onclick="event.stopPropagation();orderProduct('${p.id}')">Pesan</button>`;
+    const buyBtn = `<button class="btn-order" onclick="event.stopPropagation();orderProduct('${p.id}')">Pesan</button>`;
 
     return `
     <div class="product-card" onclick="orderProduct('${p.id}')">
@@ -793,7 +735,6 @@ function renderProducts(list) {
       <div class="product-body">
         <div class="product-name">${p.name}</div>
         <div class="product-desc">${p.desc || ''}</div>
-        ${stockBadgeHtml}
         <div class="product-footer">
           <div class="product-price">Rp${Number(p.price||0).toLocaleString('id-ID')}<span>/bulan</span></div>
           ${buyBtn}
@@ -816,15 +757,6 @@ function orderProduct(id) {
   const p = products.find(x => x.id === id);
   if (!p) return;
   if (!currentUser) { showNotif('Silakan masuk terlebih dahulu', 'error'); showPage('auth', 'login'); return; }
-
-  // Cegah modal checkout terbuka untuk produk yang stoknya kosong, bukan
-  // cuma mengandalkan tombol "Habis" yang disabled — klik pada kartu produk
-  // sebelumnya masih bisa membuka modal walau tombolnya sudah disabled.
-  const { hasStock, hasStockData } = getProductStock(p.id);
-  if (hasStockData && !hasStock) {
-    showNotif('STOCK SEDANG KOSONG. Hubungi admin untuk melakukan restock.', 'error');
-    return;
-  }
 
   console.log("SELECTED PRODUCT", p);
 
@@ -883,24 +815,15 @@ function renderOrderModalBody() {
     username: (currentUser && (currentUser.displayName || currentUser.email)) || 'guest'
   };
 
-  // Stok paket yang SEDANG dipilih (bukan gabungan semua paket) — dipakai
-  // untuk menonaktifkan tombol bayar kalau paket ini kosong, sekalipun
-  // paket lain dari produk yang sama masih tersedia.
-  const selectedStock = getPackageStock(p.id, selected.name);
-  const selectedOutOfStock = selectedStock.hasStockData && !selectedStock.hasStock;
-
   const bodyHtml = hasMultiPkg ? `
     <div style="font-size:12px;color:var(--text2);margin-bottom:10px;">Pilih paket untuk <strong style="color:var(--text);">${escHtml(p.name)}</strong>:</div>
     <div style="display:flex;flex-direction:column;gap:9px;margin-bottom:16px;">
       ${pkgs.map((pkg, i) => {
         const isActive = i === currentSelectedPackageIndex;
-        const pkgStock = getPackageStock(p.id, pkg.name);
-        const pkgOutOfStock = pkgStock.hasStockData && !pkgStock.hasStock;
-        return `<div onclick="${pkgOutOfStock ? '' : `selectPackage(${i})`}" style="cursor:${pkgOutOfStock ? 'not-allowed' : 'pointer'};opacity:${pkgOutOfStock ? '0.5' : '1'};border:1.5px solid ${isActive ? 'var(--accent)' : 'var(--border)'};background:${isActive ? 'rgba(79,140,255,0.1)' : 'var(--surface2)'};border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;">
+        return `<div onclick="selectPackage(${i})" style="cursor:pointer;border:1.5px solid ${isActive ? 'var(--accent)' : 'var(--border)'};background:${isActive ? 'rgba(79,140,255,0.1)' : 'var(--surface2)'};border-radius:12px;padding:12px 14px;display:flex;justify-content:space-between;align-items:center;">
           <div style="display:flex;align-items:center;gap:9px;">
             <div style="width:16px;height:16px;border-radius:50%;border:2px solid ${isActive ? 'var(--accent)' : 'var(--border)'};background:${isActive ? 'var(--accent)' : 'transparent'};flex-shrink:0;display:flex;align-items:center;justify-content:center;">${isActive ? '<div style="width:6px;height:6px;border-radius:50%;background:#fff;"></div>' : ''}</div>
             <span style="font-size:13.5px;color:var(--text);font-weight:${isActive ? '700' : '500'};">${escHtml(pkg.name)}</span>
-            ${pkgOutOfStock ? `<span style="font-size:10.5px;font-weight:700;color:var(--danger,#e15b5b);">HABIS</span>` : ''}
           </div>
           <span style="font-size:14px;color:${isActive ? 'var(--accent)' : 'var(--text2)'};font-weight:700;font-family:'Syne',sans-serif;">Rp${Number(pkg.price||0).toLocaleString('id-ID')}</span>
         </div>`;
@@ -910,7 +833,6 @@ function renderOrderModalBody() {
       <span style="font-size:12.5px;color:var(--text2);">Total bayar</span>
       <span style="font-size:18px;font-weight:800;color:var(--accent);font-family:'Syne',sans-serif;">Rp${resolvedAmount.toLocaleString('id-ID')}<span style="font-size:11px;font-weight:400;font-family:'DM Sans';color:var(--text2);margin-left:3px;">/bulan</span></span>
     </div>
-    ${selectedOutOfStock ? `<div style="margin-bottom:10px;"><div style="font-size:12.5px;font-weight:700;color:var(--danger,#e15b5b);">STOCK SEDANG KOSONG</div><div style="font-size:11.5px;color:var(--text2);margin-top:2px;">Hubungi admin untuk melakukan restock.</div></div>` : ''}
     ${renderOrderWhatsappFieldHtml()}
     <div id="order-qris-wrap"></div>
   ` : `
@@ -920,7 +842,6 @@ function renderOrderModalBody() {
       <div style="font-size:12.5px;color:var(--text2);margin-top:3px;">${escHtml(p.desc || '')}</div>
       <div style="font-size:18px;font-weight:800;color:var(--accent);font-family:'Syne',sans-serif;margin-top:8px;">Rp${resolvedAmount.toLocaleString('id-ID')}<span style="font-size:11px;font-weight:400;font-family:'DM Sans';color:var(--text2);margin-left:3px;">/bulan</span></div>
     </div>
-    ${selectedOutOfStock ? `<div style="margin-bottom:10px;"><div style="font-size:12.5px;font-weight:700;color:var(--danger,#e15b5b);">STOCK SEDANG KOSONG</div><div style="font-size:11.5px;color:var(--text2);margin-top:2px;">Hubungi admin untuk melakukan restock.</div></div>` : ''}
     ${renderOrderWhatsappFieldHtml()}
     <div id="order-qris-wrap"></div>
     Klik tombol di bawah untuk membayar via QRIS.
@@ -930,13 +851,8 @@ function renderOrderModalBody() {
 
   const btn = document.getElementById('btn-order-go');
   btn.style.display = '';
-  if (selectedOutOfStock) {
-    btn.disabled = true;
-    btn.innerHTML = 'Stock Kosong';
-  } else {
-    btn.disabled = false;
-    btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Bayar Sekarang';
-  }
+  btn.disabled = false;
+  btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Bayar Sekarang';
   document.getElementById('btn-order-cancel').style.display = 'none';
 }
 
@@ -954,27 +870,25 @@ function selectPackage(i) {
 // PEMBAYARAN QRIS STATIS (PanaviBunga Store)
 // Tidak ada generate/gambar QR secara dinamis (Canvas dsb) — gambar QRIS
 // di bawah ini adalah FILE ASLI milik pemilik toko yang ditempatkan
-// langsung di assets/. Ganti file di assets/qris.png dengan QRIS asli Anda;
-// tidak perlu mengubah kode ini.
+// langsung di assets/ dan ditampilkan apa adanya lewat tag <img>.
 // =====================================================================
-const QRIS_IMAGE_PATH = 'assets/qris.png';
+const QRIS_IMAGE_PATH = 'assets/qris.jpg';
 
-// TODO(pemilik toko): ganti dengan nomor WhatsApp PanaviBunga Store yang
-// menerima bukti pembayaran (format internasional tanpa "+", contoh:
-// "6281234567890"). Dipakai juga untuk tombol paket Reseller/Owner di
-// orderMembership().
-const OWNER_WHATSAPP_NUMBER = '62xxxxxxxxxx';
+// Nomor WhatsApp PanaviBunga Store yang menerima bukti pembayaran & lokasi
+// konfirmasi pesanan (format internasional tanpa "+"). Dipakai juga untuk
+// tombol paket Reseller/Owner di orderMembership().
+const OWNER_WHATSAPP_NUMBER = '6289627296990';
 
 function buildWhatsappProofMessage(order) {
   const lines = [
-    'Halo, saya sudah melakukan pembayaran.',
+    'Halo bang, aku udah tranfer untuk pesanan ku, apakah bisa di konfirmasi? terimakasih..',
     '',
     `Order ID: ${order.id || '-'}`,
     `Produk: ${order.productName || '-'}`,
     `Paket: ${order.packageName || '-'}`,
     `Total: Rp${Number(order.price || 0).toLocaleString('id-ID')}`,
     '',
-    'Saya mengirimkan bukti pembayaran di chat ini.',
+    'berikut bukti transaksi nya...',
   ];
   return lines.join('\n');
 }
@@ -989,7 +903,7 @@ window.openWhatsappProof = openWhatsappProof;
 function downloadQris() {
   const a = document.createElement('a');
   a.href = QRIS_IMAGE_PATH;
-  a.download = 'QRIS-PanaviBunga-Store.png';
+  a.download = 'QRIS-PanaviBunga-Store.jpg';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -1003,7 +917,7 @@ function renderStaticQrisPayment(order) {
     <div class="payment-card-block">
       <div class="payment-card-scan-hint">Scan QRIS untuk membayar</div>
       <div class="payment-card-wrap">
-        <img src="${QRIS_IMAGE_PATH}" alt="QRIS PanaviBunga Store" style="display:block;width:100%;height:auto;border-radius:14px;">
+        <img src="${QRIS_IMAGE_PATH}" alt="QRIS PanaviBunga Store" class="payment-qris-img">
       </div>
       <div class="payment-info">
         <div class="payment-info-row">
@@ -1012,19 +926,21 @@ function renderStaticQrisPayment(order) {
         </div>
       </div>
       <div class="payment-txid">ID Transaksi: ${escHtml(order.id || '-')}</div>
-      <div style="font-size:12px;color:var(--text2);margin-top:6px;line-height:1.6;">
+      <div class="payment-note">
         Setelah membayar, klik tombol di bawah untuk mengirim bukti pembayaran lewat WhatsApp.
         Pesanan Anda berstatus <strong>Menunggu Verifikasi</strong> sampai admin memeriksa bukti pembayaran secara manual.
       </div>
-      <button type="button" class="btn btn-primary btn-sm" style="margin-top:10px;width:100%;" onclick='openWhatsappProof(${JSON.stringify(order).replace(/'/g, "&#39;")})'>
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
-        Kirim Bukti Transaksi
-      </button>
-      <button type="button" class="btn btn-ghost btn-sm payment-download-btn" onclick="downloadQris()" style="margin-top:8px;width:100%;">
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
-        Download QRIS
-      </button>
-      <div id="order-status-msg" style="font-size:13px;margin-top:10px;font-weight:700;color:var(--text2);">Menunggu Verifikasi Admin</div>
+      <div class="payment-action-group">
+        <button type="button" class="btn btn-whatsapp btn-sm full-btn" onclick='openWhatsappProof(${JSON.stringify(order).replace(/'/g, "&#39;")})'>
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M17.472 14.382c-.297-.149-1.758-.867-2.03-.967-.273-.099-.471-.148-.67.15-.197.297-.767.966-.94 1.164-.173.199-.347.223-.644.075-.297-.15-1.255-.463-2.39-1.475-.883-.788-1.48-1.761-1.653-2.059-.173-.297-.018-.458.13-.606.134-.133.298-.347.446-.52.149-.174.198-.298.298-.497.099-.198.05-.371-.025-.52-.075-.149-.669-1.612-.916-2.207-.242-.579-.487-.5-.669-.51-.173-.008-.371-.01-.57-.01-.198 0-.52.074-.792.372-.272.297-1.04 1.016-1.04 2.479 0 1.462 1.065 2.875 1.213 3.074.149.198 2.096 3.2 5.077 4.487.709.306 1.262.489 1.694.625.712.227 1.36.195 1.871.118.571-.085 1.758-.719 2.006-1.413.248-.694.248-1.289.173-1.413-.074-.124-.272-.198-.57-.347z"/><path d="M20.52 3.449C18.24 1.245 15.24 0 12.03 0 5.463 0 .123 5.34.12 11.907c0 2.096.547 4.142 1.588 5.945L.057 24l6.305-1.654a11.87 11.87 0 0 0 5.667 1.445h.005c6.554 0 11.894-5.34 11.897-11.908a11.83 11.83 0 0 0-3.412-8.434zm-8.49 18.32h-.004a9.87 9.87 0 0 1-5.031-1.378l-.36-.214-3.741.981.998-3.648-.235-.374a9.86 9.86 0 0 1-1.51-5.24c0-5.45 4.436-9.884 9.888-9.884 2.64 0 5.122 1.03 6.988 2.898a9.825 9.825 0 0 1 2.892 6.994c-.003 5.45-4.437 9.865-9.885 9.865z"/></svg>
+          Kirim Bukti Transaksi
+        </button>
+        <button type="button" class="btn btn-ghost btn-sm payment-download-btn full-btn" onclick="downloadQris()">
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+          Download QRIS
+        </button>
+      </div>
+      <div id="order-status-msg" class="payment-status-msg">Menunggu Verifikasi Admin</div>
     </div>
   `;
 }
@@ -1119,17 +1035,6 @@ async function createOrderAndShowQris() {
   if (!cleanAmount || isNaN(cleanAmount) || cleanAmount <= 0) {
     showNotif('Harga produk/paket ini tidak valid (bukan angka). Cek data produk di admin.', 'error');
     return;
-  }
-
-  // Cek ulang stok di sisi client sesaat sebelum membuat order (UX cepat).
-  // Otoritas sebenarnya tetap Firestore Rules + pengecekan manual admin
-  // saat memproses order — dicek per PAKET (productId + packageName).
-  if (currentOrderProduct && selectedPackage) {
-    const { hasStock, hasStockData } = getPackageStock(currentOrderProduct.id, selectedPackage.name);
-    if (hasStockData && !hasStock) {
-      showNotif('STOCK SEDANG KOSONG. Hubungi admin untuk melakukan restock.', 'error');
-      return;
-    }
   }
 
   const waInputEl = document.getElementById('order-wa-input');
@@ -1616,39 +1521,4 @@ function renderMyOrders() {
     </div>`;
   }).join('');
   resizeHomeSlider();
-}
-
-// ===== STOCK SYSTEM =====
-
-// Load stock untuk display publik (hanya jumlah tersedia).
-//
-// Collection Firestore "stock" berisi field kredensial (email/password akun)
-// dan Firestore Rules PanaviBunga membatasi baca collection ini hanya untuk
-// Admin — jadi angka tersedia/total per productId+packageName diambil lewat
-// endpoint serverless SENDIRI di project ini (/api/stock-availability, lihat
-// api/stock-availability.js), yang HANYA mengirim balik angka agregat, tidak
-// pernah field dokumen stock asli.
-//
-// Tetap di-poll berkala (bukan realtime listener) selama halaman terbuka
-// supaya badge stok & guard "stok habis" di checkout mengikuti perubahan
-// terbaru (mis. setelah buyer lain berhasil checkout).
-const STOCK_POLL_INTERVAL_MS = 15000;
-
-async function fetchStockAvailability() {
-  try {
-    const res = await fetch('/api/stock-availability');
-    const result = await res.json();
-    stockItems = (result && result.success && Array.isArray(result.data)) ? result.data : [];
-  } catch (e) {
-    stockItems = [];
-  }
-  if (products.length) renderProducts(
-    stockFilter === 'all' ? products : products.filter(p => p.category === stockFilter)
-  );
-}
-
-async function loadStockPublic() {
-  if (stockPollTimer) { clearInterval(stockPollTimer); stockPollTimer = null; }
-  await fetchStockAvailability();
-  stockPollTimer = setInterval(fetchStockAvailability, STOCK_POLL_INTERVAL_MS);
 }
