@@ -1968,9 +1968,9 @@ body::before {
 }
 
 /* =====================================================================
-   KARTU PEMBAYARAN QRIS — foto template (utuh, tidak diedit) + QR
-   dinamis di atasnya via canvas, lalu nominal/countdown sebagai elemen
-   HTML TERPISAH di bawah foto (bukan digambar ke dalam gambar).
+   KARTU PEMBAYARAN QRIS — foto QRIS asli (assets/qris.jpg) ditampilkan
+   apa adanya lewat <img>, TIDAK digambar ulang lewat canvas. Nominal/ID
+   transaksi ditampilkan sebagai elemen HTML terpisah di bawah foto.
    ===================================================================== */
 .payment-card-block {
   margin-top: 6px;
@@ -1985,13 +1985,24 @@ body::before {
   margin-bottom: 10px;
 }
 
-/* Wrapper cuma untuk membatasi lebar foto template supaya proporsional
+/* Wrapper cuma untuk membatasi lebar foto QRIS supaya proporsional
    di layar besar, dan tetap 100% lebar (responsif) di layar kecil. */
 .payment-card-wrap {
   position: relative;
   width: 100%;
   max-width: 260px;
   margin: 0 auto;
+  background: #fff;
+  border-radius: 16px;
+  padding: 12px;
+  box-shadow: 0 4px 18px rgba(0, 0, 0, .22);
+}
+
+.payment-qris-img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 10px;
 }
 
 .payment-card-canvas {
@@ -2068,12 +2079,53 @@ body::before {
   word-break: break-all;
 }
 
+.payment-note {
+  font-size: 12px;
+  color: var(--text2);
+  margin-top: 10px;
+  line-height: 1.6;
+}
+
+/* Grup tombol aksi kartu pembayaran (WA & Download) dibariskan rapi
+   dengan jarak yang konsisten lewat flex+gap, bukan margin-top acak. */
+.payment-action-group {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.payment-status-msg {
+  font-size: 13px;
+  margin-top: 10px;
+  font-weight: 700;
+  color: var(--text2);
+}
+
+/* Tombol "Kirim Bukti Transaksi" — warna hijau khas WhatsApp supaya
+   langsung dikenali sebagai aksi menuju WhatsApp, konsisten dipakai di
+   manapun tombol WA muncul di kartu pembayaran. */
+.btn-whatsapp {
+  background: #25D366;
+  border: 1px solid #25D366;
+  color: #06210f;
+  font-weight: 700;
+}
+.btn-whatsapp:hover {
+  background: #1fbd5a;
+  border-color: #1fbd5a;
+  transform: translateY(-1px);
+}
+.btn-whatsapp:active {
+  transform: translateY(0);
+}
+
 /* Tombol "Download QRIS" dibuat full-width & konsisten dengan tombol
    Tutup / Batalkan Pembelian di bawahnya (lihat aturan #modal-order
    .modal-actions), supaya ketiganya terlihat rapi sejajar sebagai satu
    grup tombol, bukan berantakan/acak. */
 .payment-download-btn {
-  margin-top: 14px !important;
+  margin-top: 0 !important;
 }
 
 /* =====================================================================
