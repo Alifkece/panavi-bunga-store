@@ -23,7 +23,14 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 const auth = getAuth(app);
-const db = getFirestore(app);
+// BUG FIX (deployment): getFirestore(app) tanpa argumen kedua selalu
+// menunjuk ke database bernama "(default)". Database Firestore project ini
+// dibuat dengan ID "panavibunga-store" (bukan "(default)"), sehingga semua
+// query Firestore langsung dari browser (mis. loadPublicData() menampilkan
+// produk) gagal diam-diam / mengembalikan snapshot kosong. Sama seperti
+// perbaikan di lib/firebase.js (Admin SDK) dan Admin panel's
+// firebase-config.js.
+const db = getFirestore(app, "panavibunga-store");
 const googleProvider = new GoogleAuthProvider();
 
 export { app, auth, db, googleProvider };
