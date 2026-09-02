@@ -1,5 +1,4 @@
-import admin from "firebase-admin";
-import "../lib/firebase.js"; // memastikan admin.initializeApp() sudah jalan
+import { db } from "../lib/firebase.js"; // db sudah menunjuk ke database Firestore yang benar (lihat lib/firebase.js)
 
 /**
  * Endpoint READ-ONLY, publik (tidak butuh Authorization header) — sengaja
@@ -22,7 +21,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    const db = admin.firestore();
     const snap = await db.collection("stock").get();
 
     const counts = {};
