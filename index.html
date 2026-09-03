@@ -528,7 +528,7 @@
     <div class="modal-title" id="modal-order-title">Pesan Produk</div>
     <div id="modal-order-body" style="font-size:13.5px;color:var(--text2);line-height:1.7;margin-bottom:20px;"></div>
     <div class="modal-actions">
-      <button class="btn btn-ghost" onclick="closeModal('modal-order')">Tutup</button>
+      <button class="btn btn-ghost" id="btn-order-close" onclick="closeModal('modal-order')">Tutup</button>
       <button class="btn btn-danger" id="btn-order-cancel" style="display:none;" onclick="closeModal('modal-order')">Batalkan Pembelian</button>
       <button class="btn btn-primary" id="btn-order-go" onclick="goOrder()">
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
@@ -554,6 +554,8 @@
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.min.js"></script>
+<!-- Generator QR untuk QRIS nominal-dinamis (lihat buildDynamicQris() + renderStaticQrisPayment() di js/app.js) -->
+<script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
 <script type="module">
 (function(){
   function playHero(){
