@@ -854,6 +854,11 @@ function renderOrderModalBody() {
   btn.disabled = false;
   btn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg> Bayar Sekarang';
   document.getElementById('btn-order-cancel').style.display = 'none';
+  // Reset tombol ghost "Tutup" statis ke tampil lagi setiap modal order
+  // dibuka untuk produk baru — supaya tidak "hilang" terus di percobaan
+  // order berikutnya gara-gara sebelumnya disembunyikan saat QRIS tampil.
+  const closeBtn = document.getElementById('btn-order-close');
+  if (closeBtn) closeBtn.style.display = '';
 }
 
 function selectPackage(i) {
@@ -872,12 +877,108 @@ function selectPackage(i) {
 // di bawah ini adalah FILE ASLI milik pemilik toko yang ditempatkan
 // langsung di assets/ dan ditampilkan apa adanya lewat tag <img>.
 // =====================================================================
-const QRIS_IMAGE_PATH = 'assets/qris.jpg';
-
 // Nomor WhatsApp PanaviBunga Store yang menerima bukti pembayaran & lokasi
 // konfirmasi pesanan (format internasional tanpa "+"). Dipakai juga untuk
 // tombol paket Reseller/Owner di orderMembership().
 const OWNER_WHATSAPP_NUMBER = '6289627296990';
+
+// =====================================================================
+// QRIS NOMINAL OTOMATIS
+// String QRIS STATIS asli milik PanaviBunga Store (dari penyedia QRIS,
+// BUKAN hasil scan/olahan gambar assets/qris.jpg). Setiap kali checkout,
+// buildDynamicQris() menyisipkan nominal pesanan ke dalam string ini
+// (tag EMVCo 54 = transaction amount, tag 01 diubah dari "11" ke "12" =
+// dinamis) lalu menghitung ulang CRC — supaya saat di-scan, nominal
+// SUDAH otomatis terisi di aplikasi pembayaran pembeli, tidak perlu
+// diketik manual. QR hasil sisipan ini digambar ulang lewat library
+// eksternal "qrcode" (lihat index.html) — SATU-SATUNYA bagian yang
+// memang harus canvas, karena kode QR dengan nominal berbeda secara
+// matematis memang harus di-generate ulang, tidak bisa dari foto statis.
+const QRIS_STATIC_STRING =
+  '00020101021126610014COM.GO-JEK.WWW01189360091435740128140210G5740128140303UMI51440014ID.CO.QRIS.WWW0215ID10265003792880303UMI5204899953033605802ID5925SUTRIATI, Digital & Kreat6009SITUBONDO61056835662070703A016304F337';
+
+// Template branded QRIS (foto "THE SHOOTS / PANAVISTORE" milik pemilik
+// toko) yang jadi LATAR — QR dinamis hasil buildDynamicQris() ditimpakan
+// (drawImage) persis di kotak putih pada foto ini, TIDAK menggantikan
+// seluruh foto. Posisi disimpan sebagai FRAKSI dari lebar/tinggi gambar
+// (bukan piksel tetap), supaya tetap presisi walau file template diganti
+// dengan resolusi lain, selama tata letaknya sama persis.
+const QRIS_TEMPLATE_IMAGE_PATH = 'assets/qris.jpg';
+const QRIS_TEMPLATE_QR_AREA = { left: 0.462, top: 0.362, size: 0.493 };
+
+function loadImageEl(src) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Gagal memuat gambar: ' + src));
+    img.src = src;
+  });
+}
+
+function generateQrDataUrl(text, size) {
+  return new Promise((resolve, reject) => {
+    if (!window.QRCode || typeof window.QRCode.toDataURL !== 'function') {
+      reject(new Error('Library QRCode belum termuat'));
+      return;
+    }
+    window.QRCode.toDataURL(text, { width: size, margin: 0 }, (err, url) => {
+      if (err) reject(err); else resolve(url);
+    });
+  });
+}
+
+// Gambar template branded ke canvas, lalu timpakan QR dinamis persis di
+// area putihnya. Kalau template gagal dimuat (mis. file belum ada / typo
+// path), fallback ke QR polos saja supaya pembayaran tetap bisa jalan.
+async function composeQrisCanvas(canvasEl, dynamicPayload) {
+  const bgImg = await loadImageEl(QRIS_TEMPLATE_IMAGE_PATH);
+  const qrDataUrl = await generateQrDataUrl(dynamicPayload, 900);
+  const qrImg = await loadImageEl(qrDataUrl);
+
+  canvasEl.width = bgImg.naturalWidth;
+  canvasEl.height = bgImg.naturalHeight;
+  const ctx = canvasEl.getContext('2d');
+  ctx.drawImage(bgImg, 0, 0);
+
+  const qx = bgImg.naturalWidth * QRIS_TEMPLATE_QR_AREA.left;
+  const qy = bgImg.naturalHeight * QRIS_TEMPLATE_QR_AREA.top;
+  const qsize = bgImg.naturalWidth * QRIS_TEMPLATE_QR_AREA.size;
+  ctx.drawImage(qrImg, qx, qy, qsize, qsize);
+}
+
+function crc16Ccitt(str) {
+  let crc = 0xFFFF;
+  for (let i = 0; i < str.length; i++) {
+    crc ^= (str.charCodeAt(i) & 0xFF) << 8;
+    for (let b = 0; b < 8; b++) {
+      crc = (crc & 0x8000) ? ((crc << 1) ^ 0x1021) & 0xFFFF : (crc << 1) & 0xFFFF;
+    }
+  }
+  return crc.toString(16).toUpperCase().padStart(4, '0');
+}
+
+function buildDynamicQris(amount) {
+  const base = QRIS_STATIC_STRING;
+  let body = base.slice(0, -4); // buang 4 karakter nilai CRC lama
+  if (!body.endsWith('6304')) throw new Error('Format QRIS_STATIC_STRING tidak sesuai (tag 63 tidak ditemukan di akhir).');
+  body = body.slice(0, -4); // buang juga tag+len "6304"-nya
+
+  // Point of Initiation Method: "11" (statis) -> "12" (dinamis, karena
+  // sekarang punya nominal tetap per transaksi).
+  body = body.replace('010211', '010212');
+
+  const amountStr = String(Math.max(0, Math.round(Number(amount) || 0)));
+  const tag54 = '54' + String(amountStr.length).padStart(2, '0') + amountStr;
+
+  // Tag 54 (amount) harus disisipkan SEBELUM tag 58 (country code) sesuai
+  // urutan field EMVCo QRIS yang benar.
+  const idx58 = body.indexOf('5802ID');
+  if (idx58 === -1) throw new Error('Tag country code (58=ID) tidak ditemukan di QRIS_STATIC_STRING.');
+  body = body.slice(0, idx58) + tag54 + body.slice(idx58);
+
+  const bodyWithCrcPrefix = body + '6304';
+  return bodyWithCrcPrefix + crc16Ccitt(bodyWithCrcPrefix);
+}
 
 function buildWhatsappProofMessage(order) {
   const lines = [
@@ -901,9 +1002,14 @@ function openWhatsappProof(order) {
 window.openWhatsappProof = openWhatsappProof;
 
 function downloadQris() {
+  // Download QR yang SEDANG tampil di canvas (sudah berisi nominal pesanan
+  // ini) — bukan lagi file statis assets/qris.jpg, karena QR yang benar
+  // untuk dibayar sekarang selalu QR dinamis hasil generate per pesanan.
+  const canvasEl = document.getElementById('order-qris-canvas');
+  if (!canvasEl) return;
   const a = document.createElement('a');
-  a.href = QRIS_IMAGE_PATH;
-  a.download = 'QRIS-PanaviBunga-Store.jpg';
+  a.href = canvasEl.toDataURL('image/png');
+  a.download = 'QRIS-PanaviBunga-Store.png';
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);
@@ -913,20 +1019,22 @@ window.downloadQris = downloadQris;
 function renderStaticQrisPayment(order) {
   const wrap = document.getElementById('order-qris-wrap');
   if (!wrap) return;
+  const amount = Number(order.price || 0);
   wrap.innerHTML = `
     <div class="payment-card-block">
-      <div class="payment-card-scan-hint">Scan QRIS untuk membayar</div>
+      <div class="payment-card-scan-hint">Scan QRIS untuk membayar — nominal sudah otomatis terisi</div>
       <div class="payment-card-wrap">
-        <img src="${QRIS_IMAGE_PATH}" alt="QRIS PanaviBunga Store" class="payment-qris-img">
+        <canvas id="order-qris-canvas" class="payment-qris-img"></canvas>
       </div>
       <div class="payment-info">
         <div class="payment-info-row">
           <span class="payment-info-label">Total bayar</span>
-          <span class="payment-info-amount">Rp${Number(order.price || 0).toLocaleString('id-ID')}</span>
+          <span class="payment-info-amount">Rp${amount.toLocaleString('id-ID')}</span>
         </div>
       </div>
       <div class="payment-txid">ID Transaksi: ${escHtml(order.id || '-')}</div>
       <div class="payment-note">
+        Nominal <strong>Rp${amount.toLocaleString('id-ID')}</strong> sudah otomatis terisi saat Anda scan — tidak perlu ketik manual.
         Setelah membayar, klik tombol di bawah untuk mengirim bukti pembayaran lewat WhatsApp.
         Pesanan Anda berstatus <strong>Menunggu Verifikasi</strong> sampai admin memeriksa bukti pembayaran secara manual.
       </div>
@@ -943,6 +1051,32 @@ function renderStaticQrisPayment(order) {
       <div id="order-status-msg" class="payment-status-msg">Menunggu Verifikasi Admin</div>
     </div>
   `;
+
+  // Gambar template branded + QR dinamis (nominal sudah tersisip) ke
+  // <canvas> yang baru dibuat di atas. Dilakukan setelah innerHTML
+  // disuntikkan supaya elemen canvas-nya sudah benar-benar ada di DOM.
+  const canvasEl = document.getElementById('order-qris-canvas');
+  if (canvasEl) {
+    let dynamicPayload;
+    try {
+      dynamicPayload = buildDynamicQris(amount);
+    } catch (e) {
+      console.error('Gagal membangun QRIS dinamis:', e);
+    }
+    if (dynamicPayload) {
+      composeQrisCanvas(canvasEl, dynamicPayload).catch((err) => {
+        console.error('Gagal menyusun QRIS branded, fallback ke QR polos:', err);
+        // Fallback: kalau template/foto gagal dimuat, tetap tampilkan QR
+        // polos (fungsional) supaya pembayaran tidak terblokir cuma
+        // karena masalah gambar dekorasi.
+        if (window.QRCode && typeof window.QRCode.toCanvas === 'function') {
+          window.QRCode.toCanvas(canvasEl, dynamicPayload, { width: 260, margin: 1 }, (e2) => {
+            if (e2) console.error('Gagal menggambar QR fallback:', e2);
+          });
+        }
+      });
+    }
+  }
 }
 
 function orderMembership(type) {
@@ -1066,6 +1200,12 @@ async function createOrderAndShowQris() {
 
     renderStaticQrisPayment({ id: orderRef.id, ...orderData });
 
+    // BUG FIX: dulu tombol ghost "Tutup" statis (btn-order-close) dan
+    // cancelBtn (yang teksnya diubah jadi "Tutup" juga di sini) tampil
+    // BERSAMAAN — dua tombol bertuliskan "Tutup" berdampingan. Sekarang
+    // tombol ghost disembunyikan, hanya cancelBtn (merah) yang tampil.
+    const closeBtn = document.getElementById('btn-order-close');
+    if (closeBtn) closeBtn.style.display = 'none';
     btn.style.display = 'none';
     cancelBtn.style.display = '';
     cancelBtn.textContent = 'Tutup';
