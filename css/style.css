@@ -1985,24 +1985,23 @@ body::before {
   margin-bottom: 10px;
 }
 
-/* Wrapper cuma untuk membatasi lebar foto QRIS supaya proporsional
-   di layar besar, dan tetap 100% lebar (responsif) di layar kecil. */
+/* Wrapper untuk membatasi lebar kartu QRIS branded (foto persegi utuh,
+   bukan lagi cuma kotak QR kecil) supaya proporsional di layar besar, dan
+   tetap 100% lebar (responsif) di layar kecil. */
 .payment-card-wrap {
   position: relative;
   width: 100%;
-  max-width: 260px;
+  max-width: 320px;
   margin: 0 auto;
-  background: #fff;
-  border-radius: 16px;
-  padding: 12px;
-  box-shadow: 0 4px 18px rgba(0, 0, 0, .22);
 }
 
 .payment-qris-img {
   display: block;
   width: 100%;
   height: auto;
-  border-radius: 10px;
+  border-radius: 14px;
+  background: #fff; /* QR butuh latar putih solid supaya tetap terbaca scanner */
+  box-shadow: 0 2px 10px rgba(0, 0, 0, .15);
 }
 
 .payment-card-canvas {
@@ -2140,7 +2139,7 @@ body::before {
 }
 
 @media (max-width: 480px) {
-  .payment-card-wrap { max-width: 220px; }
+  .payment-card-wrap { max-width: 260px; }
   .payment-info { max-width: 100%; }
   .payment-info-amount { font-size: 16.5px; }
   .payment-info-countdown { font-size: 15px; }
