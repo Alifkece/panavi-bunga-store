@@ -637,6 +637,21 @@ body::before {
 .badge-purple { background: var(--surface2); border-color: var(--border); color: var(--text2); }
 .badge-gold { background: var(--surface2); border-color: var(--border); color: var(--text2); }
 
+.badge-wa {
+  background: rgba(79, 212, 138, 0.12);
+  border-color: rgba(79, 212, 138, 0.22);
+  color: var(--success);
+  text-decoration: none;
+  cursor: pointer;
+  transition: transform 0.2s var(--ease-premium), background 0.2s ease, border-color 0.2s ease;
+}
+
+.badge-wa:hover {
+  background: rgba(79, 212, 138, 0.22);
+  border-color: rgba(79, 212, 138, 0.45);
+  transform: translateY(-2px);
+}
+
 .social-btns { display: flex; gap: 8px; margin-top: 6px; flex-wrap: wrap; }
 
 /* Magnetic pull target (desktop-only JS in index.html) — smooth settle. */
